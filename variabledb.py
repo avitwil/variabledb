@@ -1,372 +1,267 @@
-import dill as pickle
+import dill
 import logging
-from typing import Dict, Any, Optional, List
 import os
+from typing import Any, Optional, Iterator, Tuple, Dict
 
-# Configure logging
-logging.basicConfig(
-    level=logging.DEBUG,
-    filename='variabledb_log.log',
-    encoding='utf-8',
-    filemode='w',
-    format='%(levelname)s (%(asctime)s): %(message)s (Line: %(lineno)d [%(filename)s])',
-    datefmt='%d/%m/%y %I:%M:%S'
-)
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-def check_file_name(filename: str) -> str:
-    """Ensure the filename has a .db extension.
-
-    Args:
-        filename: The name of the file to check.
-
-    Returns:
-        The filename with .db extension added if it was missing.
-
-    Raises:
-        TypeError: If filename is not a string.
-
-    Example:
-         check_file_name("data")
-
-         check_file_name("data.db")
+class File:
     """
-    if not isinstance(filename, str):
-        raise TypeError("filename must be a string")
-    return filename if filename.endswith(".db") else f"{filename}.db"
+    Descriptor for validating and formatting filenames.
+    Ensures the filename is a string and ends with '.db'.
+    """
 
-class VariableDb:
-    """A class to manage a dictionary of variables stored in a .db file.
+    def __init__(self) -> None:
+        self.name: Optional[str] = None
 
-    The class allows adding, deleting, replacing, saving, and loading variables
-    to/from a file using pickle, with variable names resolved from a given scope.
+    def __set_name__(self, owner: type, name: str) -> None:
+        self.name = name
+
+    def __get__(self, instance: Any, owner: type) -> Optional[str]:
+        return instance.__dict__.get(self.name, None)
+
+    def __set__(self, instance: Any, value: str) -> None:
+        if not isinstance(value, str):
+            raise ValueError(f"{self.name} must be a string")
+        instance.__dict__[self.name] = value if value.endswith(".db") else f"{value}.db"
+
+
+class VariableDB:
+    """
+    A simple variable-based database using dill for persistence.
+    Stores variables by name, allows loading and saving to a file.
 
     Attributes:
-        filename: The name of the file to save/load variables (with .db extension).
-        data: The dictionary storing variable names and values.
-        scope: The dictionary used to resolve variable names (e.g., globals()).
+        filename (str): The path to the .db file.
+        scope (dict): The external scope to bind variables into.
+        data (dict): The actual stored data.
     """
-    unsaved_files = set()
 
-    def __init__(self, filename: str, scope: Optional[Dict[str, Any]] = None) -> None:
-        """Initialize the VariableDb with a filename and optional scope.
+    filename = File()
+
+    def __init__(self, filename: str, *, scope: Dict[str, Any], data: Optional[Dict[str, Any]] = None) -> None:
+        """
+        Initialize the VariableDB.
 
         Args:
-            filename: The name of the file to save/load variables.
-            scope: The dictionary to resolve variable names. Defaults to globals().
-
-        Raises:
-            TypeError: If filename is not a string or scope is not a dictionary.
-
-        Example:
-             db = VariableDb("data", globals())
-
-             db = VariableDb("data.db", locals())
+            filename (str): The file to save/load from.
+            scope (dict): A namespace (usually globals()) for variable resolution.
+            data (dict, optional): Initial data to populate the database.
         """
-        self.filename: str = check_file_name(filename)
-        self.data: Dict[str, Any] = {}
-        self.scope: Dict[str, Any] = scope if scope is not None else globals()
-        if not isinstance(self.scope, dict):
-            raise TypeError("scope must be a dictionary")
-        VariableDb.unsaved_files.add(self.filename)
+        self.filename = filename
+        self.data = data or {}
+        self.scope = scope
 
-    def __enter__(self):
-        """Enter the context, loading variables from the file if it exists.
+    def __repr__(self) -> str:
+        return f"VariableDB(filename={self.filename!r}, data_keys={list(self.data.keys())})"
 
-        Returns:
-            VariableDb: The current instance of the VariableDb class.
+    def __str__(self) -> str:
+        lines = [f"VariableDB: {self.filename}"]
+        if not self.data:
+            lines.append("  (empty)")
+        else:
+            for key, value in self.data.items():
+                lines.append(f"  - {key}: {type(value).__name__} = {repr(value)}")
+        return "\n".join(lines)
 
-        Raises:
-            FileNotFoundError: If the file exists but cannot be accessed.
-            pickle.UnpicklingError: If deserialization of the file fails.
-            ValueError: If the loaded data is not a dictionary.
-
-        Example:
-             with VariableDb("data") as db:
-                # Automatically saves to 'data.db' on context exit
-        """
-        try:
-            if not os.path.exists(self.filename):
-                self.add_to_unsaved()
-            else:
-                self.load()
-            return self
-        except Exception as e:
-            logging.error(f"Failed to load file in __enter__: {e}")
-
-    def __repr__(self):
-        return f"VariableDb(filename={self.filename}, scope={self.scope})"
-
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.data)
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Exit the context, saving the variables dictionary to the file.
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, VariableDB):
+            return NotImplemented
+        return self.data == other.data and self.filename == other.filename
+
+    def __iter__(self) -> Iterator[Tuple[str, Any]]:
+        """
+        Iterate over (key, value) pairs in the database.
+        """
+        return iter(self.data.items())
+
+    def __delitem__(self, key: str) -> None:
+        """
+        Delete an item by key.
 
         Args:
-            exc_type: The type of the exception that occurred, if any.
-            exc_val: The instance of the exception that occurred, if any.
-            exc_tb: The traceback of the exception that occurred, if any.
+            key (str): The key to delete.
+        """
+        del self.data[key]
 
-        Raises:
-            OSError: If there is an error writing to the file.
-            pickle.PicklingError: If serialization fails.
+    def __bool__(self) -> bool:
+        """
+        Return True if database contains any data, else False.
+        """
+        return bool(self.data)
 
-        Example:
-             with VariableDb("data") as db:
-                # Automatically saves {'x': 42} to 'data.db' on exit
+    def __enter__(self) -> "VariableDB":
+        """
+        Context manager entry: loads data from file.
+
+        Returns:
+            VariableDB: The instance itself.
+        """
+        try:
+            self.load()
+        except Exception as e:
+            logger.error(f"(VariableDB.__enter__) {e}")
+        return self
+
+    def __exit__(self, exc_type: Optional[type], exc_val: Optional[BaseException], exc_tb: Optional[Any]) -> None:
+        """
+        Context manager exit: saves data to file.
         """
         try:
             self.save()
         except Exception as e:
-            logging.error(f"Failed to save on context exit: {e}")
+            logger.error(f"(VariableDB.__exit__) {e}")
 
-    def get_variable_name(self, variable: Any) -> Optional[str]:
-        """Retrieve the name of a variable from the scope.
+    def __getitem__(self, key: str) -> Any:
+        """
+        Get an item by key.
 
         Args:
-            variable: The variable object to find in the scope.
+            key (str): The key to retrieve.
 
         Returns:
-            The name of the variable if found, otherwise None.
+            Any: The value stored under the key.
+        """
+        return self.data[key]
 
-        Example:
-             x = 42
-             db.get_variable_name(x) --> 'x'
+    def __setitem__(self, key: str, value: Any) -> None:
+        """
+        Set an item by key.
+
+        Args:
+            key (str): The key under which to store the value.
+            value (Any): The value to store.
+        """
+        self.data[key] = value
+
+    def __contains__(self, key: str) -> bool:
+        """
+        Check if a key exists in the database.
+
+        Args:
+            key (str): The key to check.
+
+        Returns:
+            bool: True if key exists, False otherwise.
+        """
+        return key in self.data
+
+    def get_variable_name(self, variable: Any) -> Optional[str]:
+        """
+        Attempt to retrieve the variable's name from the scope.
+
+        Args:
+            variable (Any): The variable to look up.
+
+        Returns:
+            Optional[str]: The name of the variable in the scope, if found.
         """
         try:
             for name, val in self.scope.items():
                 if val is variable:
                     return name
-        except (KeyError, TypeError) as e:
-            logging.warning(f"Failed to get variable name: {e}")
+        except Exception as e:
+            logger.error(f"(VariableDB.get_variable_name) {e}")
         return None
 
-    def add(self, variable: Any) -> None:
-        """Add a variable to the dictionary if it doesn't already exist.
+    def add(self, variable: Any, name: Optional[str] = None) -> None:
+        """
+        Add a single variable to the database.
 
         Args:
-            variable: The variable to add.
+            variable (Any): The variable to store.
+            name (Optional[str]): The name to store it under. If None, tries to infer from scope.
 
         Raises:
-            ValueError: If the variable name cannot be determined.
-            KeyError: If the variable name already exists in the dictionary.
-
-        Example:
-             x = 42
-             db.add(x)
+            ValueError: If the name can't be determined.
         """
-        try:
+        if name is None:
             name = self.get_variable_name(variable)
-            if name is None:
-                raise ValueError("Could not determine variable name")
-            if name in self.data:
-                raise KeyError(f"Variable '{name}' already exists")
-            self.data[name] = variable
-            self.add_to_unsaved()
-        except (ValueError, KeyError, TypeError) as e:
-            logging.error(f"Failed to add variable: {e}")
+        if name is None:
+            raise ValueError("Cannot determine variable name to add")
+        self.data[name] = variable
 
-    def add_by_name(self, var_name: str) -> None:
-        """Add a variable to the dictionary by its name from the scope.
-
-        Args:
-            var_name: The name of the variable to add.
-
-        Raises:
-            KeyError: If the variable name is not found in the scope or already exists.
-
-        Example:
-             x = 42
-             db.add_by_name('x')
+    def add_multiple(self, **variables: Any) -> None:
         """
-        if var_name not in self.scope:
-            logging.error(f"Variable '{var_name}' not found in scope")
-            raise KeyError(f"Variable '{var_name}' not found in scope")
-        if var_name in self.data:
-            logging.error(f"Variable '{var_name}' already exists in data")
-            raise KeyError(f"Variable '{var_name}' already exists")
-        self.data[var_name] = self.scope[var_name]
-        self.add_to_unsaved()
-
-    def add_multiple(self, *variables: Any) -> None:
-        """Add multiple variables to the dictionary.
+        Add multiple variables at once.
 
         Args:
-            *variables: One or more variable objects to add.
-
-        Raises:
-            ValueError: If any variable name cannot be determined.
-            KeyError: If any variable name already exists in the dictionary.
-
-        Example:
-             x, y = 42, "test"
-             db.add_multiple(x, y)
+            **variables: Variables to add, with names as keys.
         """
         try:
-            for variable in variables:
-                self.add(variable)
-            self.add_to_unsaved()
-        except (ValueError, KeyError, TypeError) as e:
-            logging.error(f"Failed to add multiple variables: {e}")
+            for name, variable in variables.items():
+                self.add(variable, name)
+        except Exception as e:
+            logger.error(f"(VariableDB.add_multiple) {e}")
 
-    def delete(self, variable: Any) -> None:
-        """Delete a variable from the dictionary based on its value.
+    def delete(self, variable_name: str) -> None:
+        """
+        Delete a variable from the database by name.
 
         Args:
-            variable: The variable to remove (resolved by identity).
+            variable_name (str): The name of the variable to delete.
 
         Raises:
-            ValueError: If the variable name cannot be determined.
-            KeyError: If the variable name is not found in the dictionary.
-
-        Example:
-             db.delete(x)
+            ValueError: If variable_name is not a string.
+            KeyError: If variable_name does not exist in data.
         """
         try:
-            name = self.get_variable_name(variable)
-            if name is None:
-                raise ValueError("Could not determine variable name")
-            if name not in self.data:
-                raise KeyError(f"Variable '{name}' not found in dictionary")
-            del self.data[name]
-            self.add_to_unsaved()
-        except (ValueError, KeyError) as e:
-            logging.error(f"Failed to delete variable: {e}")
+            if not isinstance(variable_name, str):
+                raise ValueError("variable name must be string")
+            elif variable_name not in self.data:
+                raise KeyError(f"Variable '{variable_name}' not found in database")
+            else:
+                del self.data[variable_name]
+        except Exception as e:
+            logger.error(f"(VariableDB.delete) {e}")
 
-    def replace(self, variable: Any) -> None:
-        """Replace the value of an existing variable in the dictionary.
-
-        Args:
-            variable: The variable with the new value to replace.
-
-        Raises:
-            ValueError: If the variable name cannot be determined.
-            KeyError: If the variable name does not exist in the dictionary.
-
-        Example:
-             db.replace(x)
+    def clear(self) -> None:
         """
-        try:
-            name = self.get_variable_name(variable)
-            if name is None:
-                raise ValueError("Could not determine variable name")
-            if name not in self.data:
-                raise KeyError(f"Variable '{name}' does not exist")
-            self.data[name] = variable
-            self.add_to_unsaved()
-        except (ValueError, KeyError) as e:
-            logging.error(f"Failed to replace variable: {e}")
+        Clear all stored variables.
+        """
+        self.data.clear()
 
     def save(self) -> None:
-        """Save the variables dictionary to the specified .db file using pickle.
-
-        Raises:
-            OSError: If there is an error writing to the file.
-            pickle.PicklingError: If serialization fails.
-
-        Example:
-             db.save()
+        """
+        Save the data to the file using dill.
         """
         try:
+            folder = os.path.dirname(self.filename)
+            if folder and not os.path.exists(folder):
+                os.makedirs(folder)
             with open(self.filename, "wb") as file:
-                pickle.dump(self.data, file)
-            VariableDb.unsaved_files.discard(self.filename)
-        except (OSError, pickle.PicklingError) as e:
-            logging.error(f"Failed to save to {self.filename}: {e}")
+                dill.dump(self.data, file)
+        except Exception as e:
+            logger.error(f"(VariableDB.save) {e}")
 
     def load(self) -> None:
-        """Load variables from the .db file into the dictionary.
-
-        Updates the internal dictionary with the loaded variables.
-
-        Raises:
-            FileNotFoundError: If the file does not exist.
-            pickle.UnpicklingError: If deserialization fails.
-            ValueError: If the loaded data is not a dictionary.
-
-        Example:
-             db.load()
-
-        Note:
-        To add loaded variables to globals() or locals(), do:
-            globals().update(db.data)
-            # or
-            locals().update(db.data)
+        """
+        Load the data from the file using dill.
+        Updates the given scope if loading succeeds.
         """
         try:
             with open(self.filename, "rb") as file:
-                data = pickle.load(file)
-                if not isinstance(data, dict):
-                    raise ValueError("Loaded data is not a dictionary")
-                self.data = data
-                self.add_to_unsaved()
-        except (FileNotFoundError, pickle.UnpicklingError, ValueError) as e:
-            logging.error(f"Failed to load file {self.filename}: {e}")
+                self.data = dill.load(file)
+                if self.data is not None:
+                    self.scope.update(self.data)
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            logger.error(f"(VariableDB.load) {e}")
 
-    def clear(self) -> None:
-        """Clear all variables from the dictionary.
-
-        Example:
-             db.clear()
+    def get(self, key: str, default: Optional[Any] = None) -> Any:
         """
-        self.data.clear()
-        self.add_to_unsaved()
+        Retrieve a value by key, return default if key not found.
 
-    def display(self) -> None:
-        """Print all variables stored in the database."""
-        for name, val in self.data.items():
-            print(f"{name} = {val}")
+        Args:
+            key (str): The key to look up.
+            default (Any, optional): Value to return if key is not found.
 
-    def add_to_unsaved(self) -> None:
-        """Mark the file as unsaved."""
-        VariableDb.unsaved_files.add(self.filename)
-
-def save_all_open_files() -> None:
-    """Save all files with unsaved changes."""
-    for filename in VariableDb.unsaved_files.copy():
-        with VariableDb(filename) as db:
-            db.load()
-            db.save()
-
-
-if __name__ == "__main__":
-    # Example scope
-    global_scope = globals()
-
-    # Define some variables
-    a = 10
-    b = "Hello"
-    c = [1, 2, 3]
-
-    # Use context manager to auto-load/save
-    with VariableDb("example_vars", global_scope) as db:
-        # Add single variables by value
-        db.add(a)
-        db.add(b)
-
-        # Add multiple variables at once
-        db.add_multiple(c)
-
-        # Add variable by name (string)
-        db.add_by_name("a")  # Will raise KeyError if 'a' already exists
-
-        # Display current variables in the database
-        print("\n--- Current Variables in DB ---")
-        db.display()
-
-        # Replace a variable (must already exist)
-        a = 99  # Update variable value
-        db.replace(a)
-
-        # Delete a variable
-        db.delete(b)
-
-    # After the context, everything is saved to 'example_vars.db'
-
-    # Load and print from file in a new instance
-    with VariableDb("example_vars", global_scope) as db:
-        print("\n--- Variables After Re-loading ---")
-        db.display()
-
-    # Save all unsaved files (if any were changed outside of context)
-    save_all_open_files()
+        Returns:
+            Any: The value stored under key or default.
+        """
+        return self.data.get(key, default)
