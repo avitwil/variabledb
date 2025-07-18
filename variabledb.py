@@ -3,7 +3,14 @@ import logging
 import os
 from typing import Any, Optional, Iterator, Tuple, Dict
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.DEBUG,
+    filename='variabledb_log.log',
+    encoding='utf-8',
+    filemode='w',
+    format='%(levelname)s (%(asctime)s): %(message)s (Line: %(lineno)d [%(filename)s])',
+    datefmt='%d/%m/%y %I:%M:%S'
+)
 logger = logging.getLogger(__name__)
 
 class File:
