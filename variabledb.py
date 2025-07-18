@@ -199,11 +199,15 @@ class VariableDB:
         Args:
             **variables: Variables to add, with names as keys.
         """
-        try:
-            for name, variable in variables.items():
+        errors = []
+        for name, variable in variables.items():
+            try:
                 self.add(variable, name)
-        except Exception as e:
-            logger.error(f"(VariableDB.add_multiple) {e}")
+            except Exception as e:
+                logger.error(f"(VariableDB.add_multiple) Error adding '{name}': {e}")
+                errors.append((name, e))
+        if errors:
+            raise RuntimeError(f"Errors occurred while adding variables: {errors}")
 
     def delete(self, variable_name: str) -> None:
         """
@@ -225,6 +229,7 @@ class VariableDB:
                 del self.data[variable_name]
         except Exception as e:
             logger.error(f"(VariableDB.delete) {e}")
+            raise
 
     def clear(self) -> None:
         """
@@ -272,3 +277,20 @@ class VariableDB:
             Any: The value stored under key or default.
         """
         return self.data.get(key, default)
+
+
+    def update(self, variables: Dict[str, Any], *, overwrite: bool = True) -> None:
+        """
+        Update the database with multiple variables from a dictionary.
+    
+        Args:
+            variables (Dict[str, Any]): Variables to add/update.
+            overwrite (bool): If False, will not overwrite existing keys.
+        """
+        for key, value in variables.items():
+            if not overwrite and key in self.data:
+                logger.debug(f"(VariableDB.update) Skipped '{key}' (already exists)")
+                continue
+            self.data[key] = value
+            logger.debug(f"(VariableDB.update) Set '{key}' = {type(value).__name__}")
+
